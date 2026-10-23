@@ -9,8 +9,18 @@ use App\Models\Member;
 use App\Models\Loan;
 use App\Models\LoanItem;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Hash;
 
 Route::prefix('v1')->group(function (): void {
+    Route::post('/auth/login', function () {
+        $validator = Validator::make(request()->all(), ['username' => ['required', 'string'], 'password' => ['required', 'string']]);
+        if ($validator->fails()) return response()->json(['code' => 'INVALID_CREDENTIALS', 'message' => 'Las credenciales no son válidas.', 'details' => []], 401);
+        $input = $validator->validated();
+        $user = \App\Models\User::where('email', strtolower(trim($input['username'])))->first();
+        if (!$user || !Hash::check($input['password'], $user->password)) return response()->json(['code' => 'INVALID_CREDENTIALS', 'message' => 'Las credenciales no son válidas.', 'details' => []], 401);
+        return response()->json(['access_token' => hash('sha256', $user->id.'|'.now()->timestamp.'|'.Str::random(32)), 'token_type' => 'Bearer', 'expires_in' => 28800, 'role' => 'admin']);
+    });
+
     Route::get('/health', function () {
         return response()->json(['status' => 'ok']);
     });
