@@ -92,6 +92,31 @@ Route::prefix('v1')->group(function (): void {
         return DB::transaction(function () use ($line) { $line->update(['returned_at' => now()]); Book::whereKey($line->book_id)->increment('available_copies'); return response()->json($line->fresh()); });
     });
 
+    Route::get('/loans', function () {
+        $size = min(max((int) request('size', 20), 1), 50);
+        return response()->json(Loan::with('items')->latest('loaned_at')->paginate($size));
+    });
+
+    Route::get('/loans/{id}', function (string $id) {
+        $loan = Loan::with('items')->find($id);
+        if (!$loan) return response()->json(['code' => 'NOT_FOUND', 'message' => 'Préstamo no encontrado.', 'details' => []], 404);
+        $items = $loan->items;
+        $status = $items->every(fn ($item) => $item->returned_at) ? 'closed' : ($items->contains(fn ($item) => !$item->returned_at && $item->due_at->isPast()) ? 'overdue' : 'open');
+        return response()->json(['id' => $loan->id, 'member_id' => $loan->member_id, 'loaned_at' => $loan->loaned_at, 'status' => $status, 'items' => $items]);
+    })->whereUuid('id');
+
+    Route::get('/loans/overdue', function () {
+        $items = LoanItem::whereNull('returned_at')->where('due_at', '<', now())->with('loan')->orderBy('due_at')->get();
+        return response()->json(['items' => $items->map(fn ($item) => ['loan_id' => $item->loan_id, 'item_id' => $item->id, 'book_title' => $item->book_title, 'due_at' => $item->due_at, 'days_late' => $item->due_at->diffInDays(now())])]);
+    });
+
+    Route::get('/reports/most-borrowed', function () {
+        $from = request('from'); $to = request('to');
+        if (!$from || !$to || $to < $from) return response()->json(['code' => 'INVALID_DATE_RANGE', 'message' => 'El rango de fechas no es válido.', 'details' => []], 422);
+        $rows = LoanItem::query()->join('loans', 'loans.id', '=', 'loan_items.loan_id')->whereBetween('loans.loaned_at', ["{$from} 00:00:00", "{$to} 23:59:59"])->select('loan_items.book_id', 'loan_items.book_title', 'loan_items.category_name', DB::raw('COUNT(*) as times_borrowed'))->groupBy('loan_items.book_id', 'loan_items.book_title', 'loan_items.category_name')->orderByDesc('times_borrowed')->orderBy('loan_items.book_title')->get();
+        return response()->json(['from' => $from, 'to' => $to, 'rows' => $rows]);
+    });
+
     Route::post('/books', function () {
         $validator = Validator::make(request()->all(), [
             'title' => ['required', 'string', 'max:250'],
