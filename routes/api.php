@@ -6,6 +6,9 @@ use Illuminate\Support\Str;
 use App\Models\Book;
 use App\Models\Category;
 use App\Models\Member;
+use App\Models\Loan;
+use App\Models\LoanItem;
+use Illuminate\Support\Facades\DB;
 
 Route::prefix('v1')->group(function (): void {
     Route::get('/health', function () {
@@ -53,6 +56,40 @@ Route::prefix('v1')->group(function (): void {
         }
         $data['id'] = (string) Str::uuid();
         return response()->json(Member::create($data), 201);
+    });
+
+    Route::post('/loans', function () {
+        $validator = Validator::make(request()->all(), [
+            'member_id' => ['required', 'uuid', 'exists:members,id'],
+            'items' => ['required', 'array', 'min:1', 'max:3'],
+            'items.*.book_id' => ['required', 'uuid', 'distinct', 'exists:books,id'],
+        ]);
+        if ($validator->fails()) return response()->json(['code' => 'VALIDATION_ERROR', 'message' => 'El préstamo no es válido.', 'details' => $validator->errors()], 422);
+        $data = $validator->validated();
+        return DB::transaction(function () use ($data) {
+            $books = Book::whereIn('id', collect($data['items'])->pluck('book_id'))->lockForUpdate()->get()->keyBy('id');
+            foreach ($data['items'] as $item) {
+                $book = $books[$item['book_id']];
+                if ($book->deleted_at || $book->available_copies < 1) return response()->json(['code' => 'BOOK_NOT_AVAILABLE', 'message' => 'No quedan ejemplares disponibles.', 'details' => []], 409);
+            }
+            $now = now();
+            $user = \App\Models\User::first();
+            if (!$user) $user = \App\Models\User::create(['name' => 'System', 'email' => 'system@example.test', 'password' => bcrypt(Str::random(32))]);
+            $loan = Loan::create(['id' => (string) Str::uuid(), 'member_id' => $data['member_id'], 'loaned_by_user_id' => $user->id, 'loaned_at' => $now]);
+            foreach ($data['items'] as $item) {
+                $book = $books[$item['book_id']];
+                $book->decrement('available_copies');
+                LoanItem::create(['id' => (string) Str::uuid(), 'loan_id' => $loan->id, 'book_id' => $book->id, 'book_title' => $book->title, 'isbn' => $book->isbn, 'category_name' => $book->category->name, 'due_at' => $now->copy()->addDays(14)]);
+            }
+            return response()->json($loan->load('items'), 201);
+        });
+    });
+
+    Route::post('/loans/{loan}/items/{item}/return', function (string $loan, string $item) {
+        $line = LoanItem::where('loan_id', $loan)->where('id', $item)->first();
+        if (!$line) return response()->json(['code' => 'NOT_FOUND', 'message' => 'Línea no encontrada.', 'details' => []], 404);
+        if ($line->returned_at) return response()->json(['code' => 'ITEM_ALREADY_RETURNED', 'message' => 'La línea ya fue devuelta.', 'details' => []], 409);
+        return DB::transaction(function () use ($line) { $line->update(['returned_at' => now()]); Book::whereKey($line->book_id)->increment('available_copies'); return response()->json($line->fresh()); });
     });
 
     Route::post('/books', function () {
